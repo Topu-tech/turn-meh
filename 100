@@ -2,7 +2,6 @@ const {
   default: makeWASocket,
   DisconnectReason,
   fetchLatestBaileysVersion,
-  makeInMemoryStore,
   useMultiFileAuthState,
   makeCacheableSignalKeyStore
 } = require('@whiskeysockets/baileys');
@@ -11,6 +10,7 @@ const { Boom } = require('@hapi/boom');
 const fs = require('fs');
 const path = require('path');
 const pino = require('pino');
+const http = require('http');
 const config = require('./config');
 
 // Auth folder
@@ -31,22 +31,32 @@ if (config.SESSION_ID) {
   }
 }
 
-// Load plugins
+// Plugin loader
 const plugins = [];
 const pluginsDir = path.join(__dirname, 'The100Md_plugins');
+
 if (fs.existsSync(pluginsDir)) {
-  fs.readdirSync(pluginsDir).forEach(file => {
-    if (file.endsWith('.js')) {
-      try {
-        const plugin = require(path.join(pluginsDir, file));
-        if (typeof plugin === 'function') plugins.push(plugin);
-      } catch (e) {
-        console.error(`⚠️ Plugin ${file} failed to load:`, e);
+  const pluginFiles = fs.readdirSync(pluginsDir).filter(f => f.endsWith('.js'));
+
+  for (const file of pluginFiles) {
+    const pluginPath = path.join(pluginsDir, file);
+    try {
+      const plugin = require(pluginPath);
+      if (typeof plugin === 'function') {
+        plugins.push({ run: plugin, name: file });
+        console.log(`✅ Plugin loaded: ${file}`);
+      } else {
+        console.warn(`⚠️ Skipped ${file}: Not a function export.`);
       }
+    } catch (err) {
+      console.error(`❌ Failed to load plugin ${file}:`, err);
     }
-  });
+  }
+} else {
+  console.warn(`⚠️ Plugin folder not found: ${pluginsDir}`);
 }
 
+// Start the bot
 async function startBot() {
   const { state, saveCreds } = await useMultiFileAuthState(authFolder);
   const { version } = await fetchLatestBaileysVersion();
@@ -80,6 +90,8 @@ async function startBot() {
     if (!msg?.message || msg.key.fromMe) return;
 
     const from = msg.key.remoteJid;
+    const body = msg.message.conversation || msg.message.extendedTextMessage?.text || '';
+    console.log(`📥 Message from ${from}:`, body);
 
     // Auto-view status
     if (config.AUTO_STATUS_VIEW && from === 'status@broadcast') {
@@ -102,17 +114,18 @@ async function startBot() {
       }
     }
 
-    const body = msg.message.conversation || msg.message.extendedTextMessage?.text || '';
+    // Command handling
     if (!body.startsWith(config.PREFIX)) return;
 
     const command = body.slice(config.PREFIX.length).trim().split(/\s+/)[0].toLowerCase();
     const args = body.slice(config.PREFIX.length + command.length).trim();
 
-    for (const plugin of plugins) {
+    for (const { run, name } of plugins) {
       try {
-        await plugin({ sock, msg, from, body, command, args, PREFIX: config.PREFIX, OWNER_NUMBER: config.OWNER_NUMBER });
+        await run({ sock, msg, from, body, command, args, PREFIX: config.PREFIX, OWNER_NUMBER: config.OWNER_NUMBER });
+        console.log(`📦 Plugin executed: ${name} -> ${command}`);
       } catch (err) {
-        console.error('⚠️ Plugin error:', err);
+        console.error(`⚠️ Error in plugin ${name}:`, err);
       }
     }
   });
@@ -120,8 +133,7 @@ async function startBot() {
 
 startBot();
 
-// ✅ Dummy HTTP server to keep Render alive
-const http = require('http');
+// Dummy HTTP server to keep Render alive
 http.createServer((req, res) => {
   res.writeHead(200, { 'Content-Type': 'text/plain' });
   res.end('🤖 WhatsApp bot is running.\n');
